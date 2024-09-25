@@ -1,1 +1,1 @@
-# p-splines
+# splines
