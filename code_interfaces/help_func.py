@@ -48,3 +48,9 @@ def generate_noisy_data(func, noise_param=0.0, x_range=(0, 10), n_points=50, ret
 		return x, y, x_dense, y_true
 	else:
 		return x, y
+
+def factorial(n):
+	if n <= 1:
+		return 1
+
+	return n * factorial(n - 1)
