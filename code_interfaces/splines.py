@@ -7,6 +7,8 @@ from scipy.interpolate import BSpline as SciPyBSpline, CubicSpline as SciPyCubic
 from typing import Callable, List
 from functools import lru_cache
 from scipy.linalg import solve
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 (needed for 3-D proj)
+from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error, median_absolute_error
 
 
 @lru_cache
