@@ -722,11 +722,11 @@ class CubicClosedSpline(Spline):
 	с интерфейсом fit, predict, get_basis_functions.
 	"""
 
-	def __init__(self):
+	def __init__(self, lam: float, sigma: np.ndarray = None):
 		self.x = None
 		self.y = None
-		self.sigma = None
-		self.lam = None
+		self.sigma = sigma
+		self.lam = lam
 		self.segments = None  # Список сегментов с коэффициентами a, b, c, d
 
 	def fit(self, x, y, sigma=None, lam=1.0):
@@ -974,6 +974,193 @@ class CubicClosedSpline(Spline):
 			plt.grid(True)
 		if legend:
 			plt.legend()
+		plt.tight_layout()
+		plt.show()
+
+
+class GeneralZSpline(Spline):
+	"""
+	Общий случай Z-сплайна
+	"""
+
+	def __init__(self, m: int):
+		"""
+		m: порядок сплайна
+		X, y: координаты точек для интерполяции
+		"""
+		self.m = m
+		self.X = None
+		self.y = None
+		self.derivatives_at_points = []  # Массив матриц для вычисления производных в точках
+
+	def fit(self, x: np.ndarray, y: np.ndarray) -> None:
+		self.X = x
+		self.y = y
+		for i in range(len(self.X)):
+			self.derivatives_at_points.append(self._calculate_der_matrix(i))
+
+	def predict(self, x: np.ndarray) -> np.ndarray:
+		res = []
+		for i in range(len(x)):
+			res.append(self._val_at_x(x[i]))
+		return res
+
+	def get_basis_functions(self):
+		return None
+
+	def _vandermonde_matrix_inverse(self, X_window: np.ndarray, idx_of_point: int) -> np.ndarray:
+		"""
+		Функция для вычисления обратной матрицы вандермонда по срезу массива координат по иксу
+		для точки с заданным индексом
+		X_window: срез массива координат по иксу
+		idx_of_point: точка для которой производятся вычисления
+		"""
+		V = np.zeros((2 * self.m - 1, 2 * self.m - 1))
+
+		for l in range(0, 2 * self.m - 1):
+			for p in range(0, 2 * self.m - 1):
+				V[l][p] = (X_window[l] - self.X[idx_of_point]) ** p
+
+		return np.linalg.inv(V)
+
+	def _points_left_right(self, idx_of_point: int) -> List[int]:
+		"""
+		Функция для вычисления среза массива координат по иксу
+		idx_of_point: точка для которой вычисляется срез
+		"""
+		amount_of_points_left = min(self.m - 1, idx_of_point)
+		amount_of_points_right = min(self.m - 1, len(self.X) - idx_of_point - 1)
+
+		if amount_of_points_right < amount_of_points_left:
+			amount_of_points_left += amount_of_points_left - amount_of_points_right
+		else:
+			amount_of_points_right = (self.m - 1 - amount_of_points_left) + self.m - 1
+
+		return [amount_of_points_left, amount_of_points_right]
+
+	def _calculate_der_matrix(self, idx_of_point: int) -> np.ndarray:
+		"""
+		Функция для поиска матрицы для вычисления производной в точке
+		idx_of_point: индекс точки
+		"""
+		window_bounds = self._points_left_right(idx_of_point)
+		der_window = self.X[(idx_of_point - window_bounds[0]):(idx_of_point + window_bounds[1] + 1)]
+
+		return self._vandermonde_matrix_inverse(der_window, idx_of_point)
+
+	def _lk(self, x: float, k: int, j: int) -> float:
+		return (x - self.X[j + 1]) / (self.X[j] - self.X[j + 1]) if k == 0 else (x - self.X[j]) / (
+					self.X[j + 1] - self.X[j])
+
+	def _l_0m_taylor(self, x: float, j: int, p: int) -> float:
+		res = 1
+		nom = 1
+		denom = 1
+
+		for i in range(1, self.m - p):
+			nom *= (self.m + i - 1) * (x - self.X[j]) * (-1)
+			denom *= i * (self.X[j] - self.X[j + 1])
+			res += nom / denom
+
+		return res
+
+	def _l_1m_taylor(self, x: float, j: int, p: int) -> float:
+		res = 1
+		nom = 1
+		denom = 1
+
+		for i in range(1, self.m - p):
+			nom *= (self.m + i - 1) * (x - self.X[j + 1])
+			denom *= i * (self.X[j] - self.X[j + 1])
+			res += nom / denom
+
+		return res
+
+	def _B_p0(self, x: float, j: int, p: int) -> float:
+		return ((x - self.X[j]) ** p) * self._l_0m_taylor(x, j, p) * ((self._lk(x, 0, j) ** self.m) / factorial(p))
+
+	def _B_p1(self, x: float, j: int, p: int) -> float:
+		return ((x - self.X[j + 1]) ** p) * self._l_1m_taylor(x, j, p) * ((self._lk(x, 1, j) ** self.m) / factorial(p))
+
+	def _get_derivative_at_point(self, j: int, idx_of_zero: int) -> np.ndarray:
+		"""
+		Функция для вычисления вектора из производных до m-1 порядка
+		j: индекс точки в которой вычисляется производная
+		idx_of_zero: индекс точки с которой ассоциирована базисная функция
+		"""
+		window = self._points_left_right(j)
+
+		if idx_of_zero < j - window[0] or j + window[1] < idx_of_zero:
+			return np.zeros(2 * self.m - 1)
+
+		y_der_j = np.zeros(2 * self.m - 1)
+		y_der_j[idx_of_zero - j + window[0]] = 1
+
+		return self.derivatives_at_points[j] @ y_der_j
+
+	def _Z(self, x: float, interval: int, idx_of_zero: int) -> float:
+		"""
+		Функция для вычисления значения базисного z-сплайна в точке при указанном интервале
+		x: точка, в которой вычисляется значение
+		interval: индекс точки в которой начинается интервал
+		idx_of_zero: точка, с которой ассоциирован базисный z-сплайн
+		"""
+		res = 0
+
+		der_j = self._get_derivative_at_point(interval, idx_of_zero)
+		der_j_next = self._get_derivative_at_point(interval + 1, idx_of_zero)
+
+		for p in range(self.m):
+			res += factorial(p) * der_j[p] * self._B_p0(x, interval, p) + factorial(p) * der_j_next[p] * self._B_p1(x,
+																													interval,
+																													p)
+
+		return res
+
+	def _find_interval(self, x: float) -> int:
+		left = 0
+		right = len(self.X) - 1
+
+		while left < right:
+			mid = int(left + (right - left) * 0.5)
+			if self.X[mid] <= x:
+				left = mid + 1
+			else:
+				right = mid
+
+		return left - 1
+
+	def _val_at_x(self, x: float) -> float:
+		j = self._find_interval(x)
+		res = 0
+		for i in range(len(self.X)):
+			res += self.y[i] * self._Z(x, j, i)
+		return res
+
+	@staticmethod
+	def demo(m_values: List[int] = [1, 2, 3], num_points: int = 1000):
+		X = np.array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+		y = np.array([0.01, 0.75, 1.2, 1.4, 0.2, 0.8, 0.6, 0, 0.5, 0.25])
+		x_vals = np.linspace(1, 10, 1000)
+
+		plt.figure(figsize=(10, 6))
+
+		for m in m_values:
+			spline = GeneralZSpline(m)
+			spline.fit(X, y)
+
+			plt.plot(x_vals, spline.predict(x_vals), label=f"Zₘ(x), m={m}")
+
+		# sinc_vals = np.sinc(x_vals)
+		# plt.plot(x_vals, sinc_vals, 'k--', label='sinc(x)', linewidth=1.2)
+		plt.scatter(X, y)
+
+		plt.title("Сходимость Zₘ(x) к sinc(x)")
+		plt.xlabel("x")
+		plt.ylabel("Zₘ(x)")
+		plt.grid(True)
+		plt.axhline(0, color='black', linewidth=0.5)
+		plt.legend()
 		plt.tight_layout()
 		plt.show()
 
@@ -1674,6 +1861,635 @@ class b_spline(spline):
 		control_points = b_spline.generate_random_control_points(num)
 		spline = b_spline(degree, control_points)
 		spline.plot()
+
+# ===== MARS =====
+
+class mars_spline(Spline):
+	class basis_function:
+		"""
+		Базисная функция для MARS-сплайна.
+		Позволяет использовать базисные функции в виде f(x) = c * (x - t)⁺ или f(x) = c * (t - x)⁺,
+		"""
+
+		def __init__(self, func):
+			"""
+			Инициализация базисной функции
+			Args:
+				func: Лябда-функция, которая будет использоваться в базисной функции
+			"""
+			self.func = func
+
+		# self.symbolic = None
+
+		def __call__(self, *args):
+			"""
+			Вызов базисной функции
+			Args:
+				*args: Список предикторов, который будут передан в базисную функцию
+			"""
+			return self.func(*args)
+
+		def __mul__(self, other):
+			"""
+			Перегрузка оператора умножения для базисных функций.
+			"""
+			# Если другой объект - это базисная функция, то возвращаем новую базисную функцию
+			# Если другой объект - это число, то возвращаем новую базисную функцию с умноженным значением
+			if isinstance(other, mars_spline.basis_function):
+				return mars_spline.basis_function(lambda *args: self(*args) * other(*args))
+			elif isinstance(other, (int, float)):
+				return mars_spline.basis_function(lambda *args: other * self(*args))
+			else:
+				return NotImplemented
+
+		def __rmul__(self, other):
+			"""
+			Перегрузка оператора умножения для базисных функций с левой стороны.
+			"""
+			return self.__mul__(other)
+
+		def __add__(self, other):
+			"""
+			Перегрузка оператора сложения для базисных функций.
+			"""
+			# Если другой объект - это базисная функция, то возвращаем новую базисную функцию
+			# Если другой объект - это число, то возвращаем новую базисную функцию с добавленным значением
+			if isinstance(other, mars_spline.basis_function):
+				return mars_spline.basis_function(lambda *args: self(*args) + other(*args))
+			elif isinstance(other, (int, float)):
+				return mars_spline.basis_function(lambda *args: self(*args) + other)
+			return NotImplemented
+
+		def __radd__(self, other):
+			"""
+			Перегрузка оператора сложения для базисных функций с левой стороны.
+			"""
+			# This lets `sum()` start with 0
+			if isinstance(other, (int, float)):
+				return mars_spline.basis_function(lambda *args: other + self(*args))
+			return NotImplemented
+	# return self.__add__(other)
+
+	"""Multivariate Adaptive Regression Spline"""
+
+	def __init__(self, M_max, x, y, with_pruning=True, d=3, lof='gcv'):
+		"""
+		Инициализация MARS-сплайна
+
+		Args:
+			M_max (int): Максимальное число базисных функций
+			x (array-like): Данные независимых переменных
+			y (array-like): Данные зависимой переменной
+			with_pruning (bool):
+				Использовать ли обрезку (pruning) модели. Если True, то будет использоваться алгоритм backward pass для удаления избыточных базисных функций.
+			d (int):
+				Параметр сглаживания d в GCV. Чем больше, тем меньше узлов создаётся.
+			  	Обычно выбирается из диапазона 2 <= d <= 4 (по умолчанию d = 3).
+			lof:
+				Lack-of-fit (LOF) функция, которая будет использоваться для оценки качества модели.
+				Можно выбрать 'gcv' (Generalized Cross-Validation) или 'rss' (Residual Sum of Squares).
+		"""
+		x = np.asarray(x)
+		if x.ndim == 1:
+			n_predictors = 1  # treat 1D array as a single "column"
+		elif x.ndim >= 2:
+			n_predictors = x.shape[1]
+		else:
+			raise ValueError("Input does not have dimensions!")  # scalar or empty case
+
+		# M_max can't be greater than number of observations
+		# (in that case we would just get same cuts)
+		# (but I'm not sure how it works on higher dimensions)
+		M_max |= 1  # sets the least significant bit to 1, making it odd
+		self.M_max = M_max  # min(M_max, len(y))
+		self.coefficients = None
+		self.basis_functions = np.array([mars_spline.basis_function(lambda x: 1) for _ in range(self.M_max)],
+										dtype=object)
+		self.__predictor_indices = list(range(n_predictors))
+		self.__used_predictors = np.array([set() for _ in range(self.M_max)], dtype=object)
+		self.__with_pruning = with_pruning
+		self.d = d
+		if lof == 'gcv':
+			self.LOF = self.LOF_GCV
+		elif lof == 'rss':
+			self.LOF = self.LOF_RSS
+		else:
+			raise ValueError(f"Invalid lof value: {lof}. Must be 'gcv' or 'rss'.")
+
+	def _candidate_basis_generator(self, M, x):
+		"""
+		Генератор для поиска новых кандидатов на базисные функции B_M и B_M+1.
+		Args:
+			M (int): Текущее количество базисных функций
+			x (array-like): Данные независимых переменных
+			Yields:
+				tuple: Кортеж из базисных функций B_M и B_M+1, индекса предиктора v, точки разреза t и индекса m родительской базисной функции"""
+		for m in range(0, M - 1):  # начинаем с 0, а не с 1, как в статье, т.к. индексы начинаются с 0
+			not_used = [i for i in self.__predictor_indices if i not in self.__used_predictors[m]]
+			for v in not_used:
+				cut_points = np.unique([x[j, v] for j in range(0, len(x)) if self.basis_functions[m](x[j]) > 0])
+				# bf_sum = sum(self.basis_functions[:M-1])
+
+				for t in cut_points:
+					B_M = self.basis_functions[m] * self.hinge(v, t, 1)
+					B_M1 = self.basis_functions[m] * self.hinge(v, t, -1)
+					yield (B_M, B_M1, v, t, m)
+
+		return
+
+	def forward_pass(self, x, y):
+		"""
+		Forward pass of the MARS algorithm.
+		Args:
+			x (array-like): Данные независимых переменных
+			y (array-like): Данные зависимой переменной
+		"""
+		M = 2
+		while M <= self.M_max:
+			lof_star = np.inf
+			m_star = None
+			v_star = None
+			t_star = None
+
+			# search for the next best basis functions
+			# generator returns new candidate pairs B_M and B_M+1
+			for B_M, B_M1, v, t, m in self._candidate_basis_generator(M, x):
+				# add candidate basis functions to the model and copmute lof
+				basis = np.append(self.basis_functions[:M - 1], [B_M, B_M1])
+				# compute lack-of-fit of model
+				lof = self.LOF(basis, x, y)
+				if lof < lof_star:
+					lof_star = lof
+					m_star = m
+					v_star = v
+					t_star = t
+
+			print(f"added B[{M - 1}] = [x{v_star} - {t_star}]_+")
+			print(f"added B[{M}] = [-(x{v_star} - {t_star})]_+")
+			self.basis_functions[M - 1] = self.basis_functions[m_star] * mars_spline.hinge(v_star, t_star, 1)
+			self.basis_functions[M] = self.basis_functions[m_star] * mars_spline.hinge(v_star, t_star, -1)
+			self.__used_predictors[M - 1].add(m_star)
+			self.__used_predictors[M].add(m_star)
+			M += 2
+
+	def backward_pass(self, x, y):
+		"""
+		Backward pass of the MARS algorithm.
+		Args:
+			x (array-like): Данные независимых переменных
+			y (array-like): Данные зависимой переменной
+		"""
+		M_max = len(self.basis_functions)  # number of basis functions
+		J_star = set(range(1, M_max + 1))  # {1,2,...,M_max}
+		K_star = J_star.copy()
+		lof_star = np.inf
+
+		for M in range(M_max, 1, -1):  # M_max, M_max-1, M_max-2, ..., 2
+			b = np.inf
+			L = K_star.copy()
+			for m in range(2, M + 1):
+				K = L.copy()
+				K.discard(m)  # trying to remove m-th Basis Function
+
+				indices = sorted(i - 1 for i in K)
+				remaining_basis = self.basis_functions[indices]
+				lof = self.LOF(remaining_basis, x, y)
+				if lof <= b:
+					b = lof
+					K_star = K
+				if lof <= lof_star:
+					lof_star = lof
+					J_star = K
+
+		# print(f"M_max: {M_max}; J_star: {J_star}; K_star: {K_star}")
+		indices = sorted(i - 1 for i in J_star)
+		self.basis_functions = self.basis_functions[indices]
+
+	@staticmethod
+	def least_squares(basis_funcs, x, y):
+		"""
+		Вычисляет коэффициенты базисных функций методом наименьших квадратов.
+		Args:
+			basis_funcs (list): Список базисных функций
+			x (array-like): Данные независимых переменных
+			y (array-like): Данные зависимой переменной
+		Returns:
+			tuple: Кортеж из матрицы базисных функций B и вектора коэффициентов
+		"""
+		B = np.array([[f(row) for f in basis_funcs] for row in x], dtype=float)
+		coefficents, _, _, _ = np.linalg.lstsq(B, y, rcond=None)
+		return (B, coefficents)
+
+	def LOF_RSS(self, basis_funcs, x, y):
+		"""
+		Residual Sum of Squares (RSS) for the given basis functions.
+		Args:
+			basis_funcs (list): Список базисных функций
+			x (array-like): Данные независимых переменных
+			y (array-like): Данные зависимой переменной
+		Returns:
+			float: Значение RSS
+		"""
+		B, coeff = mars_spline.least_squares(basis_funcs, x, y)
+		y_pred = B @ coeff
+		rss = np.sum((y - y_pred) ** 2)
+		return rss
+
+	def LOF_GCV(self, basis_funcs, x, y):
+		"""
+		Generalized Cross-Validation (GCV) for the given basis functions.
+		Args:
+			basis_funcs (list): Список базисных функций
+			x (array-like): Данные независимых переменных
+			y (array-like): Данные зависимой переменной
+		Returns:
+			float: Значение GCV
+		"""
+		# MSE / (1 - Complexity(M)/N)^2
+		B, coeff = mars_spline.least_squares(basis_funcs, x, y)
+		y_pred = B @ coeff
+		mse = np.mean((y - y_pred) ** 2)
+		N = len(y)
+		C = self._complexity(basis_funcs[1:], x, self.d)  # only non-constant basis functions
+		return mse / ((1 - C / N) ** 2)
+
+	def _complexity(self, basis, x, d=3):
+		"""
+		Вычисляет сложность модели, основанную на количестве базисных функций и их проекции.
+		Args:
+			basis (list): Список базисных функций
+			x (array-like): Данные независимых переменных
+			d (int): Параметр сглаживания, по умолчанию 3
+		Returns:
+			float: Значение сложности модели
+		"""
+		# B_ij = (B_i(x_j)), x_j - j-th observation of predictor set x (j-th row in matrix x)
+		B = np.array([[f(row) for row in x] for f in basis], dtype=float)
+		BTB_inv = np.linalg.pinv(B.T @ B)
+		projection = B @ BTB_inv @ B.T
+		return np.trace(projection) + 1 + d * len(basis)
+
+	def fit(self, x: np.ndarray, y: np.ndarray) -> None:
+		"""
+		Обучение сплайна на данных
+		Args:
+			x (array-like): Данные независимых переменных
+			y (array-like): Данные зависимой переменной
+		"""
+
+		# Add basis functions during forward_pass
+		self.forward_pass(x, y)
+
+		# Prune model during backward pass
+		if self.__with_pruning:
+			self.backward_pass(x, y)
+
+		# Compute coefficients
+		_, self.coefficients = mars_spline.least_squares(self.basis_functions, x, y)
+
+	def predict(self, x: np.ndarray) -> np.ndarray:
+		"""
+		Предсказание значений сплайна в точках x
+		Args:
+			x (array-like): Точки, в которых нужно предсказать значения сплайна
+			Returns:
+			np.ndarray: Предсказанные значения сплайна в точках x
+		"""
+		if self.coefficients is None:
+			raise ValueError("Spline not fitted yet")
+
+		x = np.asarray(x)
+		if x.ndim == 1:
+			x = x.reshape(-1, 1)
+
+		B = np.array([[f(row) for f in self.basis_functions] for row in x], dtype=float)
+		return B @ self.coefficients
+
+	def get_basis_functions(self) -> List[Callable]:
+		"""
+		Получение базисных функций сплайна
+		Returns:
+			List[Callable]: Список базисных функций
+		"""
+		return self.basis_functions
+
+	@staticmethod
+	def hinge(index, knot, sign):
+		"""
+		Создает базисную функцию в виде f(x) = sign * (x[index] - knot)⁺
+		Args:
+			index (int): Индекс предиктора, для которого создается базисная функция
+			knot (float): Точка разреза функции
+			sign (int): Знак функции (1 или -1)
+		Returns:
+			Callable: Базисная функция, которая принимает массив x и возвращает значения функции
+		"""
+		return mars_spline.basis_function(lambda x: max(0, sign * (x[index] - knot)))
+
+	@staticmethod
+	def demo(M_max):
+		"""
+		Демонстрация работы MARS-сплайна на синусоидальных и полиномиальных данных.
+		Args:
+			M_max (int): Максимальное количество базисных функций
+		"""
+		np.random.seed(42)
+		x = np.linspace(0, 2 * np.pi, 250)
+		x = x.reshape(-1, 1)
+		x_dense = np.linspace(0, 2 * np.pi, 200)
+
+		# Истинные функции
+		y_sin_true = np.sin(5 * x)
+		y_sin_true_dense = np.sin(5 * x_dense)
+		noise = np.random.normal(0, 0.2, len(x)).reshape(-1, 1)
+		y_sin_noisy = y_sin_true + noise
+
+		y_poly_true = 0.5 * x ** 2 - x + 1
+		y_poly_true_dense = 0.5 * x_dense ** 2 - x_dense + 1
+		noise = np.random.normal(0, 0.3, len(x)).reshape(-1, 1)
+		y_poly_noisy = y_poly_true + noise
+
+		# Параметры
+		colors = ['green']
+
+		fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+
+		# Аппроксимация синуса
+		ax1.scatter(x, y_sin_noisy, alpha=0.6, color='blue', label='Данные с шумом', s=30)
+		ax1.plot(x_dense, y_sin_true_dense, 'r--', label='Истинная функция', linewidth=3)
+
+		for color in colors:
+			mars_sin = mars_spline(M_max, x, y_sin_noisy)
+			mars_sin.fit(x, y_sin_noisy)
+			y_sin_pred = mars_sin.predict(x_dense)
+			ax1.plot(x_dense, y_sin_pred, color=color, label=f'MARS Sin', linewidth=2)
+
+		ax1.set_title('Аппроксимация синуса', fontsize=14)
+		ax1.set_xlabel('x')
+		ax1.set_ylabel('y')
+		ax1.legend()
+		ax1.grid(True, alpha=0.3)
+
+		# Аппроксимация полинома
+		ax2.scatter(x, y_poly_noisy, alpha=0.6, color='blue', label='Данные с шумом', s=30)
+		ax2.plot(x_dense, y_poly_true_dense, 'r--', label='Истинная функция', linewidth=3)
+
+		for color in colors:
+			mars_poly = mars_spline(M_max, x, y_poly_noisy)
+			mars_poly.fit(x, y_poly_noisy)
+			y_poly_pred = mars_poly.predict(x_dense)
+			ax2.plot(x_dense, y_poly_pred, color=color, label=f'MARS Poly', linewidth=2)
+
+		ax2.set_title('Аппроксимация полинома', fontsize=14)
+		ax2.set_xlabel('x')
+		ax2.set_ylabel('y')
+		ax2.legend()
+		ax2.grid(True, alpha=0.3)
+
+		plt.tight_layout()
+		plt.show()
+
+	@staticmethod
+	def regression_metrics(model, X: np.ndarray, y: np.ndarray, *, sample_weights=None):
+		"""
+		Return a dict with standard regression statistics for a fitted model.
+
+		Parameters
+		----------
+		model : fitted estimator
+			Must expose a `predict(X)` method.
+		X, y : ndarray
+			Feature matrix (N×P) and target vector (N,).
+		sample_weights : array-like, optional
+			If you used weights during fitting, pass the same weights here.
+
+		Returns
+		-------
+		metrics : dict
+			Keys: 'r2', 'adj_r2', 'rmse', 'mae', 'medae'
+		"""
+		y = np.asarray(y).ravel()
+		y_hat = model.predict(X).ravel()
+
+		# Basic sizes
+		n, p = X.shape
+		# R²
+		r2 = r2_score(y, y_hat, sample_weight=sample_weights)
+
+		# Adjusted R²
+		# Guard against n == p + 1 which would divide by zero
+		if n > p + 1:
+			adj_r2 = 1 - (1 - r2) * (n - 1) / (n - p - 1)
+		else:
+			adj_r2 = np.nan  # not defined
+
+		# Other useful errors
+		mse = mean_squared_error(y, y_hat, sample_weight=sample_weights)
+		rmse = np.sqrt(mse)
+		mae = mean_absolute_error(y, y_hat, sample_weight=sample_weights)
+		medae = median_absolute_error(y, y_hat)
+
+		return {
+			"r2": r2,
+			"adj_r2": adj_r2,
+			"rmse": rmse,
+			"mae": mae,
+			"medae": medae,
+		}
+
+	@staticmethod
+	# Format string
+	def _format_metrics(m):
+		"""
+		Форматирует метрики регрессии в строку для отображения на графике.
+		Args:
+			m (dict): Словарь с метриками регрессии
+		Returns:
+			str: Форматированная строка с метриками
+		"""
+		return (f"$R^2$: {m['r2']:.3f}\n"
+				f"Adj $R^2$: {m['adj_r2']:.3f}\n"
+				f"RMSE: {m['rmse']:.3f}\n"
+				f"MAE: {m['mae']:.3f}")
+
+	@staticmethod
+	def plot(x, y, M_max,
+			 show_data=True, color='blue', title=None,
+			 num_points=300, figsize=(10, 6), grid=True, legend=True,
+			 x_start=None, x_end=None, lof='rss'):
+		"""
+		Визуализация MARS-сплайна с параметрами.
+		Args:
+			x (array-like): Данные независимых переменных
+			y (array-like): Данные зависимой переменной
+			M_max (int): Максимальное количество базисных функций
+			show_data (bool): Показывать ли исходные данные на графике
+			color (str): Цвет линии сплайна
+			title (str): Заголовок графика
+			num_points (int): Количество точек для предсказания
+			figsize (tuple): Размер фигуры графика
+			grid (bool): Показывать ли сетку на графике
+			legend (bool): Показывать ли легенду на графике
+			x_start, x_end: Начало и конец оси x для предсказания. Если None, то берутся минимальное и максимальное значение x.
+			lof: Lack-of-fit функция ('gcv' или 'rss')
+		"""
+		spline = mars_spline(M_max, x, y, lof=lof)
+		spline.fit(x, y)
+
+		x_start = min(x) if x_start is None else x_start
+		x_end = max(x) if x_end is None else x_end
+		x_dense = np.linspace(x_start, x_end, num_points)
+		y_pred = spline.predict(x_dense)
+
+		spline_without_pruning = mars_spline(M_max, x, y, with_pruning=False, lof=lof)
+		spline_without_pruning.fit(x, y)
+		y_pred_2 = spline_without_pruning.predict(x_dense)
+
+		fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+		# plt.figure(figsize=figsize)
+		if show_data:
+			ax1.scatter(x, y, color='red', alpha=0.6, label='Данные', s=20)
+		ax1.plot(x_dense, y_pred, color=color, label=f'MARS M_max={M_max}')
+		ax1.set_xlabel("x")
+		ax1.set_ylabel("y")
+		ax1.set_title(title or f"MARS PRUNED ({len(spline.basis_functions)} basis functions)")
+
+		if show_data:
+			ax2.scatter(x, y, color='red', alpha=0.6, label='Данные', s=20)
+		ax2.plot(x_dense, y_pred_2, color=color, label=f'MARS M_max={M_max}')
+		ax2.set_xlabel("x")
+		ax2.set_ylabel("y")
+		ax2.set_title(title or f"MARS ({len(spline_without_pruning.basis_functions)} basis functions)")
+
+		metrics_1 = mars_spline.regression_metrics(spline, x, y)
+		metrics_2 = mars_spline.regression_metrics(spline_without_pruning, x, y)
+
+		ax1.text(0.05, 0.2, mars_spline._format_metrics(metrics_1),
+				 transform=ax1.transAxes, fontsize=11, verticalalignment='top',
+				 bbox=dict(boxstyle="round,pad=0.3", facecolor='white', edgecolor='gray'))
+
+		ax2.text(0.05, 0.2, mars_spline._format_metrics(metrics_2),
+				 transform=ax2.transAxes, fontsize=11, verticalalignment='top',
+				 bbox=dict(boxstyle="round,pad=0.3", facecolor='white', edgecolor='gray'))
+
+		if grid:
+			ax1.grid(True)
+			ax2.grid(True)
+		if legend:
+			ax1.legend()
+			ax2.legend()
+
+		plt.tight_layout()
+		plt.show()
+
+	@staticmethod
+	def plot_3d(model, X: np.ndarray, y: np.ndarray,
+				axes: tuple[int, int] = (0, 1), grid: int = 50, fixed: str | float | np.ndarray = "median",
+				elev: int | float = 30,
+				azim: int | float = -60, scatter_kw: dict | None = None, surface_kw: dict | None = None,
+				ax: plt.Axes | None = None,
+				show_metrics: bool = True, metrics_loc: tuple[float, float] = (0.02, 0.02)):
+		"""
+		Draw a 3-D surface of a fitted `mars_spline` model along two predictors.
+
+		Parameters
+		----------
+		model : mars_spline
+			Trained spline model with a `.predict()` method.
+		X, y : ndarray
+			Training data (N×P) and target vector (N,).
+		axes : (int, int), default (0, 1)
+			Column indices in `X` to place on the x- and y-axes.
+		grid : int, default 50
+			Number of points along each axis (surface resolution).
+		fixed : {'median', 'mean'} | float | ndarray, default 'median'
+			How to hold *other* predictors constant when P > 2.
+			* str – 'median' or 'mean' of each remaining column.
+			* float – that constant for **all** remaining columns.
+			* ndarray – shape (P-2,), explicit values.
+		elev, azim : float
+			Initial elevation and azimuth for `ax.view_init`.
+		scatter_kw, surface_kw : dict
+			Extra keyword args forwarded to `ax.scatter` and `ax.plot_surface`.
+		ax : matplotlib Axes3D, optional
+			Reuse an existing 3-D axis; if None, a new figure+axis is created.
+
+		Returns
+		-------
+		ax : matplotlib Axes3D
+			The axis containing the plot (handy for further tweaking).
+		"""
+		# unpack chosen columns
+		ix1, ix2 = axes
+		x1, x2 = X[:, ix1], X[:, ix2]
+
+		# build grid
+		x1_lin = np.linspace(x1.min(), x1.max(), grid)
+		x2_lin = np.linspace(x2.min(), x2.max(), grid)
+		X1g, X2g = np.meshgrid(x1_lin, x2_lin)
+		grid_flat = np.column_stack([X1g.ravel(), X2g.ravel()])
+
+		# handle >2 predictors
+		if X.shape[1] > 2:
+			if isinstance(fixed, str):
+				if fixed == "median":
+					vals = np.median(X[:, [i for i in range(X.shape[1]) if i not in axes]], axis=0)
+				elif fixed == "mean":
+					vals = np.mean(X[:, [i for i in range(X.shape[1]) if i not in axes]], axis=0)
+				else:
+					raise ValueError(f"unknown fixed strategy '{fixed}'")
+			elif np.isscalar(fixed):
+				vals = np.full(X.shape[1] - 2, fixed)
+			else:  # ndarray
+				vals = np.asarray(fixed, dtype=float)
+				if vals.shape != (X.shape[1] - 2,):
+					raise ValueError("fixed ndarray must have shape (P-2,)")
+			grid_flat = np.hstack([grid_flat, np.tile(vals, (grid_flat.shape[0], 1))])
+
+		# predict
+		y_pred = model.predict(grid_flat).reshape(X1g.shape)
+
+		# plotting
+		if ax is None:
+			fig = plt.figure(figsize=(9, 6))
+			ax = fig.add_subplot(111, projection="3d")
+		else:
+			fig = ax.figure
+
+		s_kw = dict(s=20, alpha=0.6, label="observed") | (scatter_kw or {})
+		ax.scatter(x1, x2, y, **s_kw)
+
+		surf_kw_default = dict(rstride=1, cstride=1, linewidth=0,
+							   antialiased=True, alpha=0.4, shade=True,
+							   label="MARS surface")
+		surf_kw = surf_kw_default | (surface_kw or {})
+		ax.plot_surface(X1g, X2g, y_pred, **surf_kw)
+
+		ax.set_xlabel(f"X{ix1}")
+		ax.set_ylabel(f"X{ix2}")
+		ax.set_zlabel("y")
+		ax.view_init(elev=elev, azim=azim)
+		ax.set_title("MARS spline fit")
+
+		# legend hack: need a proxy artist for the surface
+		if surface_kw is not None or scatter_kw is not None:
+			from matplotlib.lines import Line2D
+			proxy = Line2D([0], [0], linestyle="none", marker="s",
+						   markersize=10, markerfacecolor="gray", alpha=0.4)
+			ax.legend([proxy], ["MARS surface"], loc="best")
+
+		if show_metrics:
+			metrics = mars_spline.regression_metrics(model, X, y)
+			text = mars_spline._format_metrics(metrics)
+			fig.text(*metrics_loc, text,
+					 transform=fig.transFigure,
+					 fontsize=11,
+					 verticalalignment='bottom',
+					 horizontalalignment='left',
+					 bbox=dict(boxstyle="round,pad=0.3", facecolor='white', edgecolor='gray'))
+
+		fig.tight_layout()
+		plt.show()
 
 
 # Для отладки
